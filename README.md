@@ -39,11 +39,11 @@ This repository includes `render.yaml`.
 1. Push this repository to GitHub.
 2. In Render, create a new Blueprint from this repository.
 3. Render will use:
-   - Build command: `pip install -r requirements.txt`
+   - Build command: `pip install -r requirements.txt && python webapp/preload_bg_model.py`
    - Start command: `python webapp/app.py`
    - `HOST=0.0.0.0`
    - `OUTPUT_DIR=/tmp/product-csv-maker-runs`
-   - `U2NET_HOME=/tmp/rembg-models`
+   - `U2NET_HOME=/opt/render/project/src/.u2net`
    - `REMBG_MODEL=u2netp`
 
 The app also works on other Python web hosts that support a `Procfile`:
@@ -64,4 +64,4 @@ The generated files are stored under `webapp/runs/` locally. On hosted environme
 
 ## Note
 
-The first image is automatically processed with `rembg` and then placed on an 800x800 white background. Render Free may take longer on the first run because the background-removal model is loaded lazily.
+The first image is automatically processed with `rembg` and then placed on an 800x800 white background. On Render, the background-removal model is prepared during the build.

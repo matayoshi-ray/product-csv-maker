@@ -258,6 +258,7 @@ def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool
     try:
         with Image.open(input_path) as image:
             source = image.convert("RGB")
+            source.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
             session = get_bg_remover_session()
             if BG_REMOVE is None:
                 raise RuntimeError("背景除去処理を初期化できませんでした。")
