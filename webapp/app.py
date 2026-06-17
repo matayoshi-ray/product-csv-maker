@@ -248,6 +248,8 @@ def remove_background_with_api(input_path: Path, cutout_path: Path) -> bool:
         f"\r\n--{boundary}\r\n".encode("utf-8"),
         b'Content-Disposition: form-data; name="size"\r\n\r\nauto',
         f"\r\n--{boundary}\r\n".encode("utf-8"),
+        b'Content-Disposition: form-data; name="type"\r\n\r\nproduct',
+        f"\r\n--{boundary}\r\n".encode("utf-8"),
         b'Content-Disposition: form-data; name="format"\r\n\r\npng',
         f"\r\n--{boundary}--\r\n".encode("utf-8"),
     ]
@@ -269,6 +271,22 @@ def remove_background_with_api(input_path: Path, cutout_path: Path) -> bool:
     return True
 
 
+def has_meaningful_transparency(image: Image.Image) -> bool:
+    if image.mode != "RGBA":
+        return False
+    alpha = image.getchannel("A")
+    extrema = alpha.getextrema()
+    if extrema == (255, 255):
+        return False
+    bbox = alpha.getbbox()
+    if not bbox:
+        return False
+    width, height = image.size
+    left, top, right, bottom = bbox
+    foreground_area = (right - left) * (bottom - top)
+    return foreground_area < width * height * 0.92
+
+
 def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool:
     cutout_path = output_path.with_name(output_path.stem + "_cutout.png")
     try:
@@ -278,6 +296,10 @@ def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool
 
         with Image.open(cutout_path) as cutout:
             cutout_image = cutout.convert("RGBA")
+        if not has_meaningful_transparency(cutout_image):
+            fit_to_square_800(input_path, output_path)
+            return False
+
         bbox = cutout_image.getbbox()
         if bbox:
             cutout_image = cutout_image.crop(bbox)
@@ -338,7 +360,7 @@ def make_zip(run_dir: Path) -> Path:
     return zip_path
 
 
-def process_product(url: str, white_image: tuple[str, bytes] | None) -> tuple[ProductData, Path, Path, bool]:
+def process_product(url: str) -> tuple[ProductData, Path, Path, bool]:
     raw = fetch_bytes(url)
     page_html = decode_html(raw)
     product = parse_lanbo_product(url, page_html)
@@ -354,23 +376,13 @@ def process_product(url: str, white_image: tuple[str, bytes] | None) -> tuple[Pr
     image_dir.mkdir(parents=True, exist_ok=True)
 
     image_names: list[str] = []
-    if white_image and white_image[1]:
-        original_name = safe_slug(Path(white_image[0]).stem, "white_image") + Path(white_image[0]).suffix
-        white_source = source_dir / f"image_01_white_uploaded{Path(original_name).suffix or '.jpg'}"
-        white_source.write_bytes(white_image[1])
-        fit_to_square_800(white_source, image_dir / "image_01.jpg")
-        image_names.append("image_01.jpg")
-        start_index = 2
-    else:
-        start_index = 1
-
     auto_white_background = False
-    for url_index, image_url in enumerate(product.image_urls, start_index):
+    for url_index, image_url in enumerate(product.image_urls, 1):
         ext = Path(urllib.parse.urlparse(image_url).path).suffix.lower() or ".jpg"
         source_path = source_dir / f"image_{url_index:02d}_original{ext}"
         source_path.write_bytes(fetch_bytes(image_url))
         output_name = f"image_{url_index:02d}.jpg"
-        if not white_image and url_index == 1:
+        if url_index == 1:
             auto_white_background = remove_background_to_square_800(source_path, image_dir / output_name)
         else:
             fit_to_square_800(source_path, image_dir / output_name)
@@ -381,13 +393,12 @@ def process_product(url: str, white_image: tuple[str, bytes] | None) -> tuple[Pr
     return product, run_dir, zip_path, auto_white_background
 
 
-def parse_multipart(body: bytes, content_type: str) -> tuple[str, tuple[str, bytes] | None]:
+def parse_multipart(body: bytes, content_type: str) -> str:
     match = re.search(r"boundary=(.+)", content_type)
     if not match:
         raise ValueError("フォームデータのboundaryが見つかりません。")
     boundary = ("--" + match.group(1).strip().strip('"')).encode()
     url = ""
-    white_image: tuple[str, bytes] | None = None
     for part in body.split(boundary):
         if b"Content-Disposition:" not in part:
             continue
@@ -400,10 +411,7 @@ def parse_multipart(body: bytes, content_type: str) -> tuple[str, tuple[str, byt
         name = name_match.group(1)
         if name == "url":
             url = data.decode("utf-8", errors="replace").strip()
-        elif name == "white_image" and data:
-            filename = first_match(r'filename="([^"]*)"', disposition, flags=0) or "white_image.jpg"
-            white_image = (filename, data)
-    return url, white_image
+    return url
 
 
 def page_html(result: str = "", error: str = "") -> bytes:
@@ -469,7 +477,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
       margin-bottom: 8px;
       font-size: 14px;
     }}
-    input[type="url"], input[type="file"] {{
+    input[type="url"] {{
       width: 100%;
       min-height: 44px;
       border: 1px solid #b7c0c8;
@@ -542,11 +550,6 @@ def page_html(result: str = "", error: str = "") -> bytes:
         <label for="url">商品URL</label>
         <input id="url" name="url" type="url" required placeholder="https://www.lanbo.co.jp/product/863">
       </div>
-      <div class="field">
-        <label for="white_image">1枚目の白抜き画像（任意）</label>
-        <input id="white_image" name="white_image" type="file" accept="image/*">
-        <p class="hint">未指定の場合、APIキー設定時は1枚目の元画像を自動白抜きして800×800にします。手動で用意した白抜き画像がある場合はここに入れると優先します。</p>
-      </div>
       <button type="submit">CSVと画像ZIPを作成</button>
     </form>
 
@@ -585,12 +588,12 @@ class Handler(BaseHTTPRequestHandler):
             if length > MAX_BODY_BYTES:
                 raise ValueError("アップロード容量が大きすぎます。")
             body = self.rfile.read(length)
-            url, white_image = parse_multipart(body, self.headers.get("Content-Type", ""))
+            url = parse_multipart(body, self.headers.get("Content-Type", ""))
             if not url.startswith("https://www.lanbo.co.jp/product/"):
                 raise ValueError("現在はLANBOの商品ページURLのみ対応しています。")
-            product, run_dir, zip_path, auto_white_background = process_product(url, white_image)
+            product, run_dir, zip_path, auto_white_background = process_product(url)
             link = f"/download/{urllib.parse.quote(zip_path.name)}"
-            white_status = "アップロード画像を使用" if white_image else ("自動白抜き済み" if auto_white_background else "通常変換")
+            white_status = "自動白抜き済み" if auto_white_background else "通常変換"
             result = (
                 '<div class="result">'
                 f"作成完了\n"
