@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# Generated app output
+webapp/runs/
+
+# Local scratch and one-off extraction outputs
+work/
+outputs/
