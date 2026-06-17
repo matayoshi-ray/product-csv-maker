@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: product-csv-maker
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python webapp/app.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: OUTPUT_DIR
+        value: /tmp/product-csv-maker-runs

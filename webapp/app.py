@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import csv
 import html
-import io
 import os
 import re
-import shutil
 import sys
 import traceback
-import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -18,7 +15,6 @@ from html.parser import HTMLParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Iterable
 
 try:
     from PIL import Image
@@ -29,7 +25,7 @@ except ImportError as exc:
 
 
 ROOT = Path(__file__).resolve().parent
-OUTPUT_ROOT = ROOT / "runs"
+OUTPUT_ROOT = Path(os.environ.get("OUTPUT_DIR", str(ROOT / "runs")))
 MAX_BODY_BYTES = 30 * 1024 * 1024
 
 
@@ -559,9 +555,10 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    host = os.environ.get("HOST", "127.0.0.1")
     port = int(os.environ.get("PORT", "8765"))
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    print(f"Serving on http://127.0.0.1:{port}")
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Serving on http://{host}:{port}")
     server.serve_forever()
 
 
