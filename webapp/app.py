@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import html
+import io
 import os
 import re
 import sys
@@ -23,10 +24,17 @@ except ImportError as exc:
         "Pillow is required. Run this with the bundled workspace Python shown by Codex."
     ) from exc
 
+try:
+    from rembg import new_session, remove
+except ImportError:
+    new_session = None
+    remove = None
+
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_DIR", str(ROOT / "runs")))
 MAX_BODY_BYTES = 30 * 1024 * 1024
+BG_REMOVER_SESSION = None
 
 
 @dataclass
@@ -230,6 +238,52 @@ def fit_to_square_800(input_path: Path, output_path: Path) -> None:
         canvas.save(output_path, quality=95, subsampling=0)
 
 
+def background_removal_available() -> bool:
+    return new_session is not None and remove is not None
+
+
+def get_bg_remover_session():
+    global BG_REMOVER_SESSION
+    if BG_REMOVER_SESSION is None:
+        if not background_removal_available():
+            raise RuntimeError("背景除去ライブラリがインストールされていません。")
+        model_name = os.environ.get("REMBG_MODEL", "u2netp")
+        BG_REMOVER_SESSION = new_session(model_name)
+    return BG_REMOVER_SESSION
+
+
+def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool:
+    if not background_removal_available():
+        fit_to_square_800(input_path, output_path)
+        return False
+
+    try:
+        with Image.open(input_path) as image:
+            source = image.convert("RGB")
+            cutout = remove(source, session=get_bg_remover_session())
+            if isinstance(cutout, bytes):
+                cutout_image = Image.open(io.BytesIO(cutout)).convert("RGBA")
+            else:
+                cutout_image = cutout.convert("RGBA")
+
+        bbox = cutout_image.getbbox()
+        if bbox:
+            cutout_image = cutout_image.crop(bbox)
+        cutout_image.thumbnail((760, 760), Image.Resampling.LANCZOS)
+
+        canvas = Image.new("RGBA", (800, 800), "white")
+        canvas.alpha_composite(
+            cutout_image,
+            ((800 - cutout_image.width) // 2, (800 - cutout_image.height) // 2),
+        )
+        canvas.convert("RGB").save(output_path, quality=95, subsampling=0)
+        return True
+    except Exception:
+        traceback.print_exc()
+        fit_to_square_800(input_path, output_path)
+        return False
+
+
 def safe_slug(value: str, fallback: str = "product") -> str:
     slug = re.sub(r"[^0-9A-Za-z_-]+", "_", value).strip("_")
     return slug[:80] or fallback
@@ -269,7 +323,7 @@ def make_zip(run_dir: Path) -> Path:
     return zip_path
 
 
-def process_product(url: str, white_image: tuple[str, bytes] | None) -> tuple[ProductData, Path, Path]:
+def process_product(url: str, white_image: tuple[str, bytes] | None) -> tuple[ProductData, Path, Path, bool]:
     raw = fetch_bytes(url)
     page_html = decode_html(raw)
     product = parse_lanbo_product(url, page_html)
@@ -295,17 +349,21 @@ def process_product(url: str, white_image: tuple[str, bytes] | None) -> tuple[Pr
     else:
         start_index = 1
 
+    auto_white_background = False
     for url_index, image_url in enumerate(product.image_urls, start_index):
         ext = Path(urllib.parse.urlparse(image_url).path).suffix.lower() or ".jpg"
         source_path = source_dir / f"image_{url_index:02d}_original{ext}"
         source_path.write_bytes(fetch_bytes(image_url))
         output_name = f"image_{url_index:02d}.jpg"
-        fit_to_square_800(source_path, image_dir / output_name)
+        if not white_image and url_index == 1:
+            auto_white_background = remove_background_to_square_800(source_path, image_dir / output_name)
+        else:
+            fit_to_square_800(source_path, image_dir / output_name)
         image_names.append(output_name)
 
     write_csv(product, image_names, run_dir)
     zip_path = make_zip(run_dir)
-    return product, run_dir, zip_path
+    return product, run_dir, zip_path, auto_white_background
 
 
 def parse_multipart(body: bytes, content_type: str) -> tuple[str, tuple[str, bytes] | None]:
@@ -472,7 +530,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
       <div class="field">
         <label for="white_image">1枚目の白抜き画像（任意）</label>
         <input id="white_image" name="white_image" type="file" accept="image/*">
-        <p class="hint">未指定の場合、1枚目の元画像を白余白付き800×800にします。AI白抜き済み画像がある場合はここに入れると商品画像1として使います。</p>
+        <p class="hint">未指定の場合、1枚目の元画像を自動白抜きして800×800にします。手動で用意した白抜き画像がある場合はここに入れると優先します。</p>
       </div>
       <button type="submit">CSVと画像ZIPを作成</button>
     </form>
@@ -482,7 +540,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
 
     <section class="grid" aria-label="処理内容">
       <div class="metric"><strong>抽出項目</strong><span>商品URL、メーカー品番、車種名、商品名、カラー一覧、説明文、税別/税込価格。</span></div>
-      <div class="metric"><strong>画像処理</strong><span>全画像を白背景の800×800 JPGに変換。元画像はsource_imagesに保存。</span></div>
+      <div class="metric"><strong>画像処理</strong><span>1枚目は自動白抜き、全画像を白背景の800×800 JPGに変換。元画像はsource_imagesに保存。</span></div>
       <div class="metric"><strong>出力</strong><span>product.csv、imagesフォルダー、source_imagesフォルダーをZIPでダウンロード。</span></div>
     </section>
   </main>
@@ -510,8 +568,9 @@ class Handler(BaseHTTPRequestHandler):
             url, white_image = parse_multipart(body, self.headers.get("Content-Type", ""))
             if not url.startswith("https://www.lanbo.co.jp/product/"):
                 raise ValueError("現在はLANBOの商品ページURLのみ対応しています。")
-            product, run_dir, zip_path = process_product(url, white_image)
+            product, run_dir, zip_path, auto_white_background = process_product(url, white_image)
             link = f"/download/{urllib.parse.quote(zip_path.name)}"
+            white_status = "アップロード画像を使用" if white_image else ("自動白抜き済み" if auto_white_background else "通常変換")
             result = (
                 '<div class="result">'
                 f"作成完了\n"
@@ -519,6 +578,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"メーカー品番: {html.escape(product.manufacturer_part_number)}\n"
                 f"カラー: {html.escape(' / '.join(product.colors))}\n"
                 f"画像枚数: {len(product.image_urls)}\n"
+                f"1枚目: {html.escape(white_status)}\n"
                 f'<a href="{link}">ZIPをダウンロード</a>'
                 "</div>"
             )

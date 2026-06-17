@@ -10,3 +10,7 @@ services:
         value: 0.0.0.0
       - key: OUTPUT_DIR
         value: /tmp/product-csv-maker-runs
+      - key: U2NET_HOME
+        value: /tmp/rembg-models
+      - key: REMBG_MODEL
+        value: u2netp
