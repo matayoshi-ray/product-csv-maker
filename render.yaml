@@ -3,16 +3,10 @@ services:
     name: product-csv-maker
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt && python webapp/preload_bg_model.py
+    buildCommand: pip install -r requirements.txt
     startCommand: python webapp/app.py
     envVars:
       - key: HOST
         value: 0.0.0.0
       - key: OUTPUT_DIR
         value: /tmp/product-csv-maker-runs
-      - key: U2NET_HOME
-        value: /opt/render/project/src/.u2net
-      - key: REMBG_MODEL
-        value: u2netp
-      - key: BG_REMOVE_TIMEOUT_SECONDS
-        value: 75

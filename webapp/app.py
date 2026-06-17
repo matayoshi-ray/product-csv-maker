@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import csv
 import html
-import io
-import importlib.util
-import multiprocessing
 import os
 import re
 import sys
@@ -29,7 +26,7 @@ except ImportError as exc:
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_DIR", str(ROOT / "runs")))
 MAX_BODY_BYTES = 30 * 1024 * 1024
-BG_REMOVE_TIMEOUT_SECONDS = int(os.environ.get("BG_REMOVE_TIMEOUT_SECONDS", "75"))
+REMOVE_BG_ENDPOINT = "https://api.remove.bg/v1.0/removebg"
 
 
 @dataclass
@@ -233,44 +230,51 @@ def fit_to_square_800(input_path: Path, output_path: Path) -> None:
         canvas.save(output_path, quality=95, subsampling=0)
 
 
-def background_removal_available() -> bool:
-    return importlib.util.find_spec("rembg") is not None
+def remove_background_with_api(input_path: Path, cutout_path: Path) -> bool:
+    api_key = os.environ.get("REMOVE_BG_API_KEY", "").strip()
+    if not api_key:
+        return False
 
-
-def remove_background_worker(input_path: str, cutout_path: str, model_name: str) -> None:
-    from rembg import new_session, remove
-
-    with Image.open(input_path) as image:
-        source = image.convert("RGB")
-        source.thumbnail((640, 640), Image.Resampling.LANCZOS)
-        cutout = remove(source, session=new_session(model_name))
-        if isinstance(cutout, bytes):
-            cutout_image = Image.open(io.BytesIO(cutout)).convert("RGBA")
-        else:
-            cutout_image = cutout.convert("RGBA")
-        cutout_image.save(cutout_path)
+    boundary = f"----product-csv-maker-{uuid.uuid4().hex}"
+    image_bytes = input_path.read_bytes()
+    filename = input_path.name
+    parts = [
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="image_file"; filename="{filename}"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8"),
+        image_bytes,
+        f"\r\n--{boundary}\r\n".encode("utf-8"),
+        b'Content-Disposition: form-data; name="size"\r\n\r\nauto',
+        f"\r\n--{boundary}\r\n".encode("utf-8"),
+        b'Content-Disposition: form-data; name="format"\r\n\r\npng',
+        f"\r\n--{boundary}--\r\n".encode("utf-8"),
+    ]
+    body = b"".join(parts)
+    req = urllib.request.Request(
+        REMOVE_BG_ENDPOINT,
+        data=body,
+        headers={
+            "X-Api-Key": api_key,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        if resp.status != 200:
+            return False
+        cutout_path.write_bytes(resp.read())
+    return True
 
 
 def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool:
-    if not background_removal_available():
-        fit_to_square_800(input_path, output_path)
-        return False
-
     cutout_path = output_path.with_name(output_path.stem + "_cutout.png")
     try:
-        model_name = os.environ.get("REMBG_MODEL", "u2netp")
-        process = multiprocessing.Process(
-            target=remove_background_worker,
-            args=(str(input_path), str(cutout_path), model_name),
-        )
-        process.start()
-        process.join(BG_REMOVE_TIMEOUT_SECONDS)
-        if process.is_alive():
-            process.terminate()
-            process.join(5)
-            raise TimeoutError(f"背景除去が{BG_REMOVE_TIMEOUT_SECONDS}秒以内に完了しませんでした。")
-        if process.exitcode != 0 or not cutout_path.exists():
-            raise RuntimeError("背景除去プロセスが正常終了しませんでした。")
+        if not remove_background_with_api(input_path, cutout_path):
+            fit_to_square_800(input_path, output_path)
+            return False
 
         with Image.open(cutout_path) as cutout:
             cutout_image = cutout.convert("RGBA")
@@ -541,7 +545,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
       <div class="field">
         <label for="white_image">1枚目の白抜き画像（任意）</label>
         <input id="white_image" name="white_image" type="file" accept="image/*">
-        <p class="hint">未指定の場合、1枚目の元画像を自動白抜きして800×800にします。手動で用意した白抜き画像がある場合はここに入れると優先します。</p>
+        <p class="hint">未指定の場合、APIキー設定時は1枚目の元画像を自動白抜きして800×800にします。手動で用意した白抜き画像がある場合はここに入れると優先します。</p>
       </div>
       <button type="submit">CSVと画像ZIPを作成</button>
     </form>

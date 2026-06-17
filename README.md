@@ -39,13 +39,16 @@ This repository includes `render.yaml`.
 1. Push this repository to GitHub.
 2. In Render, create a new Blueprint from this repository.
 3. Render will use:
-   - Build command: `pip install -r requirements.txt && python webapp/preload_bg_model.py`
+   - Build command: `pip install -r requirements.txt`
    - Start command: `python webapp/app.py`
    - `HOST=0.0.0.0`
    - `OUTPUT_DIR=/tmp/product-csv-maker-runs`
-   - `U2NET_HOME=/opt/render/project/src/.u2net`
-   - `REMBG_MODEL=u2netp`
-   - `BG_REMOVE_TIMEOUT_SECONDS=75`
+
+For automatic background removal, add this environment variable in Render:
+
+```text
+REMOVE_BG_API_KEY=your_remove_bg_api_key
+```
 
 The app also works on other Python web hosts that support a `Procfile`:
 
@@ -65,4 +68,4 @@ The generated files are stored under `webapp/runs/` locally. On hosted environme
 
 ## Note
 
-The first image is automatically processed with `rembg` and then placed on an 800x800 white background. On Render, the background-removal model is prepared during the build. If background removal exceeds `BG_REMOVE_TIMEOUT_SECONDS`, the app falls back to normal 800x800 conversion so the ZIP generation does not hang.
+The first image is automatically sent to remove.bg when `REMOVE_BG_API_KEY` is set, then placed on an 800x800 white background. If no API key is set, the app falls back to normal 800x800 conversion. Render Free does not have enough memory to run local AI background removal reliably.
