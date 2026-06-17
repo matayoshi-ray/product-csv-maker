@@ -4,6 +4,7 @@ import csv
 import html
 import io
 import importlib.util
+import multiprocessing
 import os
 import re
 import sys
@@ -28,8 +29,7 @@ except ImportError as exc:
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_DIR", str(ROOT / "runs")))
 MAX_BODY_BYTES = 30 * 1024 * 1024
-BG_REMOVER_SESSION = None
-BG_REMOVE = None
+BG_REMOVE_TIMEOUT_SECONDS = int(os.environ.get("BG_REMOVE_TIMEOUT_SECONDS", "75"))
 
 
 @dataclass
@@ -237,17 +237,18 @@ def background_removal_available() -> bool:
     return importlib.util.find_spec("rembg") is not None
 
 
-def get_bg_remover_session():
-    global BG_REMOVER_SESSION, BG_REMOVE
-    if BG_REMOVER_SESSION is None:
-        if not background_removal_available():
-            raise RuntimeError("背景除去ライブラリがインストールされていません。")
-        from rembg import new_session, remove
+def remove_background_worker(input_path: str, cutout_path: str, model_name: str) -> None:
+    from rembg import new_session, remove
 
-        BG_REMOVE = remove
-        model_name = os.environ.get("REMBG_MODEL", "u2netp")
-        BG_REMOVER_SESSION = new_session(model_name)
-    return BG_REMOVER_SESSION
+    with Image.open(input_path) as image:
+        source = image.convert("RGB")
+        source.thumbnail((640, 640), Image.Resampling.LANCZOS)
+        cutout = remove(source, session=new_session(model_name))
+        if isinstance(cutout, bytes):
+            cutout_image = Image.open(io.BytesIO(cutout)).convert("RGBA")
+        else:
+            cutout_image = cutout.convert("RGBA")
+        cutout_image.save(cutout_path)
 
 
 def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool:
@@ -255,19 +256,24 @@ def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool
         fit_to_square_800(input_path, output_path)
         return False
 
+    cutout_path = output_path.with_name(output_path.stem + "_cutout.png")
     try:
-        with Image.open(input_path) as image:
-            source = image.convert("RGB")
-            source.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
-            session = get_bg_remover_session()
-            if BG_REMOVE is None:
-                raise RuntimeError("背景除去処理を初期化できませんでした。")
-            cutout = BG_REMOVE(source, session=session)
-            if isinstance(cutout, bytes):
-                cutout_image = Image.open(io.BytesIO(cutout)).convert("RGBA")
-            else:
-                cutout_image = cutout.convert("RGBA")
+        model_name = os.environ.get("REMBG_MODEL", "u2netp")
+        process = multiprocessing.Process(
+            target=remove_background_worker,
+            args=(str(input_path), str(cutout_path), model_name),
+        )
+        process.start()
+        process.join(BG_REMOVE_TIMEOUT_SECONDS)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+            raise TimeoutError(f"背景除去が{BG_REMOVE_TIMEOUT_SECONDS}秒以内に完了しませんでした。")
+        if process.exitcode != 0 or not cutout_path.exists():
+            raise RuntimeError("背景除去プロセスが正常終了しませんでした。")
 
+        with Image.open(cutout_path) as cutout:
+            cutout_image = cutout.convert("RGBA")
         bbox = cutout_image.getbbox()
         if bbox:
             cutout_image = cutout_image.crop(bbox)
@@ -284,6 +290,9 @@ def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool
         traceback.print_exc()
         fit_to_square_800(input_path, output_path)
         return False
+    finally:
+        if cutout_path.exists():
+            cutout_path.unlink()
 
 
 def safe_slug(value: str, fallback: str = "product") -> str:
@@ -552,6 +561,11 @@ def page_html(result: str = "", error: str = "") -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
+    def do_HEAD(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+
     def do_GET(self) -> None:
         if self.path.startswith("/download/"):
             self.serve_download()

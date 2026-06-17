@@ -55,3 +55,4 @@ CSVには以下を入れます。
 
 Render Freeでは、初回処理時に背景除去モデルの読み込みで時間がかかることがあります。
 Renderでは`webapp/preload_bg_model.py`をビルド時に実行して、背景除去モデルを事前に準備します。
+背景除去が`BG_REMOVE_TIMEOUT_SECONDS`以内に終わらない場合は、処理停止を避けるため通常の800x800変換へ戻します。

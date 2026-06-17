@@ -14,3 +14,5 @@ services:
         value: /opt/render/project/src/.u2net
       - key: REMBG_MODEL
         value: u2netp
+      - key: BG_REMOVE_TIMEOUT_SECONDS
+        value: 75
