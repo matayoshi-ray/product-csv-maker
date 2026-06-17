@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import html
 import io
+import importlib.util
 import os
 import re
 import sys
@@ -24,17 +25,11 @@ except ImportError as exc:
         "Pillow is required. Run this with the bundled workspace Python shown by Codex."
     ) from exc
 
-try:
-    from rembg import new_session, remove
-except ImportError:
-    new_session = None
-    remove = None
-
-
 ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_DIR", str(ROOT / "runs")))
 MAX_BODY_BYTES = 30 * 1024 * 1024
 BG_REMOVER_SESSION = None
+BG_REMOVE = None
 
 
 @dataclass
@@ -239,14 +234,17 @@ def fit_to_square_800(input_path: Path, output_path: Path) -> None:
 
 
 def background_removal_available() -> bool:
-    return new_session is not None and remove is not None
+    return importlib.util.find_spec("rembg") is not None
 
 
 def get_bg_remover_session():
-    global BG_REMOVER_SESSION
+    global BG_REMOVER_SESSION, BG_REMOVE
     if BG_REMOVER_SESSION is None:
         if not background_removal_available():
             raise RuntimeError("背景除去ライブラリがインストールされていません。")
+        from rembg import new_session, remove
+
+        BG_REMOVE = remove
         model_name = os.environ.get("REMBG_MODEL", "u2netp")
         BG_REMOVER_SESSION = new_session(model_name)
     return BG_REMOVER_SESSION
@@ -260,7 +258,10 @@ def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool
     try:
         with Image.open(input_path) as image:
             source = image.convert("RGB")
-            cutout = remove(source, session=get_bg_remover_session())
+            session = get_bg_remover_session()
+            if BG_REMOVE is None:
+                raise RuntimeError("背景除去処理を初期化できませんでした。")
+            cutout = BG_REMOVE(source, session=session)
             if isinstance(cutout, bytes):
                 cutout_image = Image.open(io.BytesIO(cutout)).convert("RGBA")
             else:
