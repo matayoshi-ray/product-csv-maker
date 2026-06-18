@@ -414,7 +414,7 @@ def make_zip(run_dir: Path) -> Path:
     return zip_path
 
 
-def process_product(url: str) -> tuple[ProductData, Path, Path, bool]:
+def process_product(url: str, image_rename_code: str = "") -> tuple[ProductData, Path, Path, bool]:
     raw = fetch_bytes(url)
     page_html = decode_html(raw)
     product = parse_lanbo_product(url, page_html)
@@ -422,7 +422,8 @@ def process_product(url: str) -> tuple[ProductData, Path, Path, bool]:
         raise ValueError("商品画像URLを抽出できませんでした。LANBOの商品ページURLか確認してください。")
 
     product_id = first_match(r"/product/([0-9]+)", urllib.parse.urlparse(url).path, flags=0)
-    run_name = f"{safe_slug(product.manufacturer_part_number or product_id)}_{uuid.uuid4().hex[:8]}"
+    image_name_base = safe_slug(image_rename_code or product.manufacturer_part_number or product_id, "image")
+    run_name = f"{image_name_base}_{uuid.uuid4().hex[:8]}"
     run_dir = OUTPUT_ROOT / run_name
     source_dir = run_dir / "source_images"
     image_dir = run_dir / "images"
@@ -435,7 +436,7 @@ def process_product(url: str) -> tuple[ProductData, Path, Path, bool]:
         ext = Path(urllib.parse.urlparse(image_url).path).suffix.lower() or ".jpg"
         source_path = source_dir / f"image_{url_index:02d}_original{ext}"
         source_path.write_bytes(fetch_bytes(image_url))
-        output_name = f"image_{url_index:02d}.jpg"
+        output_name = f"{image_name_base}_{url_index:02d}.jpg"
         if url_index == 1:
             auto_white_background = remove_background_to_square_800(source_path, image_dir / output_name)
         else:
@@ -447,12 +448,13 @@ def process_product(url: str) -> tuple[ProductData, Path, Path, bool]:
     return product, run_dir, zip_path, auto_white_background
 
 
-def parse_multipart(body: bytes, content_type: str) -> str:
+def parse_multipart(body: bytes, content_type: str) -> tuple[str, str]:
     match = re.search(r"boundary=(.+)", content_type)
     if not match:
         raise ValueError("フォームデータのboundaryが見つかりません。")
     boundary = ("--" + match.group(1).strip().strip('"')).encode()
     url = ""
+    image_rename_code = ""
     for part in body.split(boundary):
         if b"Content-Disposition:" not in part:
             continue
@@ -465,7 +467,9 @@ def parse_multipart(body: bytes, content_type: str) -> str:
         name = name_match.group(1)
         if name == "url":
             url = data.decode("utf-8", errors="replace").strip()
-    return url
+        elif name == "image_rename_code":
+            image_rename_code = data.decode("utf-8", errors="replace").strip()
+    return url, image_rename_code
 
 
 def page_html(result: str = "", error: str = "") -> bytes:
@@ -531,7 +535,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
       margin-bottom: 8px;
       font-size: 14px;
     }}
-    input[type="url"] {{
+    input[type="url"], input[type="text"] {{
       width: 100%;
       min-height: 44px;
       border: 1px solid #b7c0c8;
@@ -604,6 +608,11 @@ def page_html(result: str = "", error: str = "") -> bytes:
         <label for="url">商品URL</label>
         <input id="url" name="url" type="url" required placeholder="https://www.lanbo.co.jp/product/863">
       </div>
+      <div class="field">
+        <label for="image_rename_code">画像リネーム用 品番</label>
+        <input id="image_rename_code" name="image_rename_code" type="text" placeholder="例: BED07-BR">
+        <p class="hint">入力すると画像名を「品番_01.jpg」「品番_02.jpg」の形式にします。未入力の場合はメーカー品番を使います。</p>
+      </div>
       <button type="submit">CSVと画像ZIPを作成</button>
     </form>
 
@@ -642,10 +651,10 @@ class Handler(BaseHTTPRequestHandler):
             if length > MAX_BODY_BYTES:
                 raise ValueError("アップロード容量が大きすぎます。")
             body = self.rfile.read(length)
-            url = parse_multipart(body, self.headers.get("Content-Type", ""))
+            url, image_rename_code = parse_multipart(body, self.headers.get("Content-Type", ""))
             if not url.startswith("https://www.lanbo.co.jp/product/"):
                 raise ValueError("現在はLANBOの商品ページURLのみ対応しています。")
-            product, run_dir, zip_path, auto_white_background = process_product(url)
+            product, run_dir, zip_path, auto_white_background = process_product(url, image_rename_code)
             link = f"/download/{urllib.parse.quote(zip_path.name)}"
             white_status = "自動白抜き済み" if auto_white_background else "通常変換"
             result = (
@@ -655,6 +664,7 @@ class Handler(BaseHTTPRequestHandler):
                 f"メーカー品番: {html.escape(product.manufacturer_part_number)}\n"
                 f"カラー: {html.escape(' / '.join(product.colors))}\n"
                 f"画像枚数: {len(product.image_urls)}\n"
+                f"画像品番: {html.escape(image_rename_code or product.manufacturer_part_number)}\n"
                 f"1枚目: {html.escape(white_status)}\n"
                 f'<a href="{link}">ZIPをダウンロード</a>'
                 "</div>"
