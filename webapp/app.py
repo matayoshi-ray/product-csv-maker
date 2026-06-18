@@ -35,6 +35,8 @@ class ProductData:
     product_name: str
     manufacturer_part_number: str
     vehicle_name: str
+    vehicle_model: str
+    vehicle_year: str
     colors: list[str]
     material: str
     description: str
@@ -108,6 +110,14 @@ def extract_dd(label: str, fragment: str) -> str:
     return strip_tags(first_match(pattern, fragment))
 
 
+def extract_dd_any(labels: list[str], fragment: str) -> str:
+    for label in labels:
+        value = extract_dd(label, fragment)
+        if value:
+            return value
+    return ""
+
+
 def split_colors(raw: str) -> list[str]:
     text = raw
     text = re.sub(r"^(マット|カラー|色)\s*[:：]", "", text).strip()
@@ -168,6 +178,31 @@ def extract_configured_colors(page_html: str) -> list[str]:
     return colors
 
 
+def infer_vehicle_model(vehicle_text: str) -> str:
+    text = clean_text(vehicle_text)
+    for pattern in (
+        r"([0-9０-９]+\s*系)",
+        r"([A-Z]{1,5}[0-9]{1,4}[A-Z]?(?:/[A-Z]{1,5}[0-9]{1,4}[A-Z]?)*系?)",
+    ):
+        match = re.search(pattern, text, re.I)
+        if match:
+            return clean_text(match.group(1))
+    return ""
+
+
+def infer_vehicle_year(text: str) -> str:
+    text = clean_text(text)
+    patterns = [
+        r"((?:平成|令和|H|R)\s*[0-9０-９]+年?\s*[0-9０-９]*月?\s*(?:以降|～|〜|-|－|から)?\s*(?:(?:平成|令和|H|R)\s*[0-9０-９]+年?\s*[0-9０-９]*月?)?)",
+        r"((?:19|20)[0-9]{2}年\s*[0-9０-９]*月?\s*(?:以降|～|〜|-|－|から)?\s*(?:(?:19|20)[0-9]{2}年\s*[0-9０-９]*月?)?)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return clean_text(match.group(1))
+    return ""
+
+
 def parse_lanbo_product(url: str, page_html: str) -> ProductData:
     desc_fragment = first_match(
         r'<div class="item_desc_text custom_desc">\s*(.*?)\s*</div>\s*</div>\s*</div>',
@@ -181,12 +216,18 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
 
     part_number = first_match(r'<span class="model_number_value">(.*?)</span>', page_html)
     vehicle_name = extract_dd("対応車種", desc_fragment)
+    vehicle_model = extract_dd_any(["型式", "車輌型式", "車両型式", "対応型式"], desc_fragment)
+    vehicle_year = extract_dd_any(["年式", "対応年式"], desc_fragment)
     material_color = extract_dd("素材/カラー", desc_fragment)
     basic_product_name = extract_dd("商品名", desc_fragment)
     if not product_name and basic_product_name:
         product_name = basic_product_name
 
     colors = extract_configured_colors(page_html) or split_colors(material_color)
+    if not vehicle_model:
+        vehicle_model = infer_vehicle_model(vehicle_name)
+    if not vehicle_year:
+        vehicle_year = infer_vehicle_year(description)
     material = material_color
     price_ex_tax = first_match(r'id="pricech">\s*([0-9,]+)\s*<span[^>]*>円</span>', page_html)
     price_in_tax = first_match(
@@ -212,6 +253,8 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
         product_name=product_name,
         manufacturer_part_number=part_number,
         vehicle_name=vehicle_name,
+        vehicle_model=vehicle_model,
+        vehicle_year=vehicle_year,
         colors=colors,
         material=material,
         description=description,
@@ -328,26 +371,37 @@ def safe_slug(value: str, fallback: str = "product") -> str:
 
 def write_csv(product: ProductData, image_names: list[str], run_dir: Path) -> Path:
     csv_path = run_dir / "product.csv"
-    row: dict[str, str] = {
-        "商品URL": product.url,
-        "メーカー品番": product.manufacturer_part_number,
-        "車種名": product.vehicle_name,
-        "商品名": product.product_name,
-        "カラー（色）": " / ".join(product.colors),
-        "カラー一覧": " / ".join(product.colors),
-        "素材": product.material,
-        "商品の説明文": product.description,
-        "定価（税別）": product.price_ex_tax,
-        "定価（税込）": product.price_in_tax,
-        "画像フォルダー": "images",
-    }
-    for index, name in enumerate(image_names, 1):
-        row[f"商品画像{index}"] = f"images/{name}"
+    fieldnames = [
+        "元URL",
+        "車種名",
+        "車種型番",
+        "車種年式",
+        "ブランク",
+        "商品名",
+        "カラー",
+        "メーカー品番",
+        "税込み価格",
+    ]
+    colors = product.colors or [""]
+    rows = [
+        {
+            "元URL": product.url,
+            "車種名": product.vehicle_name,
+            "車種型番": product.vehicle_model,
+            "車種年式": product.vehicle_year,
+            "ブランク": "",
+            "商品名": product.product_name,
+            "カラー": color,
+            "メーカー品番": product.manufacturer_part_number,
+            "税込み価格": product.price_in_tax,
+        }
+        for color in colors
+    ]
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerow(row)
+        writer.writerows(rows)
     return csv_path
 
 
@@ -557,7 +611,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
     {error}
 
     <section class="grid" aria-label="処理内容">
-      <div class="metric"><strong>抽出項目</strong><span>商品URL、メーカー品番、車種名、商品名、カラー一覧、説明文、税別/税込価格。</span></div>
+      <div class="metric"><strong>抽出項目</strong><span>元URL、車種名、車種型番、車種年式、商品名、カラー、メーカー品番、税込み価格。</span></div>
       <div class="metric"><strong>画像処理</strong><span>1枚目は自動白抜き、全画像を白背景の800×800 JPGに変換。元画像はsource_imagesに保存。</span></div>
       <div class="metric"><strong>出力</strong><span>product.csv、imagesフォルダー、source_imagesフォルダーをZIPでダウンロード。</span></div>
     </section>
