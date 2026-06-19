@@ -43,6 +43,7 @@ class ProductData:
     price_ex_tax: str
     price_in_tax: str
     image_urls: list[str]
+    variants: list[tuple[str, str]]
 
 
 class TextExtractor(HTMLParser):
@@ -106,7 +107,7 @@ def first_match(pattern: str, text: str, flags: int = re.S) -> str:
 
 
 def extract_dd(label: str, fragment: str) -> str:
-    pattern = rf"<dt>\s*{re.escape(label)}\s*</dt>\s*<br\s*/?>\s*<dd>(.*?)</dd>"
+    pattern = rf"<dt>\s*{re.escape(label)}\s*</dt>\s*(?:<br\s*/?>\s*)*<dd>\s*(.*?)(?=<dt\b|</dl>)"
     return strip_tags(first_match(pattern, fragment))
 
 
@@ -131,6 +132,15 @@ def split_colors(raw: str) -> list[str]:
             continue
         colors.append(part)
     return colors or ([raw.strip()] if raw.strip() else [])
+
+
+def unique_values(values: list[str]) -> list[str]:
+    unique: list[str] = []
+    for value in values:
+        value = clean_text(value)
+        if value and value not in unique:
+            unique.append(value)
+    return unique
 
 
 def option_texts(select_html: str) -> list[str]:
@@ -178,6 +188,70 @@ def extract_configured_colors(page_html: str) -> list[str]:
     return colors
 
 
+def extract_variants(page_html: str) -> list[tuple[str, str]]:
+    variants: list[tuple[str, str]] = []
+    for label_html in re.findall(r'<span class="variation_label">(.*?)</span>', page_html, re.I | re.S):
+        label = strip_tags(label_html)
+        match = re.match(r"(.+?)\s+([A-Z0-9][A-Z0-9_-]*[0-9])$", label, re.I)
+        if not match:
+            continue
+        color = clean_text(match.group(1))
+        part_number = clean_text(match.group(2))
+        if color and part_number and (color, part_number) not in variants:
+            variants.append((color, part_number))
+    return variants
+
+
+def extract_color_setting(desc_fragment: str) -> list[str]:
+    color_text = extract_dd_any(["カラー設定", "設定カラー", "素材/カラー", "カラー"], desc_fragment)
+    return split_colors(color_text)
+
+
+def split_vehicle_lines(vehicle_text: str) -> tuple[str, str, str]:
+    raw_lines = [line.strip(" ・\t") for line in vehicle_text.splitlines()]
+    lines = [line for line in raw_lines if line]
+    vehicle_names: list[str] = []
+    vehicle_models: list[str] = []
+    vehicle_years: list[str] = []
+    for line in lines:
+        name = line
+        model = ""
+        year = ""
+        match = re.match(r"(.+?)\s*[［\[]([^］\]]+)[］\]]\s*(.*)", line)
+        if match:
+            name = clean_text(match.group(1))
+            model = clean_text(match.group(2))
+            year = clean_text(match.group(3))
+        else:
+            inferred_model = infer_vehicle_model(line)
+            inferred_year = infer_vehicle_year(line)
+            if inferred_model:
+                model = inferred_model
+                name = clean_text(line.replace(inferred_model, ""))
+            if inferred_year:
+                year = inferred_year
+                name = clean_text(name.replace(inferred_year, ""))
+        vehicle_names.append(name)
+        vehicle_models.append(model)
+        vehicle_years.append(year)
+    return (
+        " / ".join(unique_values(vehicle_names)),
+        " / ".join(unique_values(vehicle_models)),
+        " / ".join(unique_values(vehicle_years)),
+    )
+
+
+def extract_sales_description(desc_fragment: str) -> str:
+    match = re.search(r"(<h4>\s*セット内容\s*</h4>.*)", desc_fragment, re.I | re.S)
+    if match:
+        return strip_tags(match.group(1))
+    return strip_tags(desc_fragment)
+
+
+def normalize_price(value: str) -> str:
+    return re.sub(r"\D", "", value)
+
+
 def infer_vehicle_model(vehicle_text: str) -> str:
     text = clean_text(vehicle_text)
     for pattern in (
@@ -208,7 +282,7 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
         r'<div class="item_desc_text custom_desc">\s*(.*?)\s*</div>\s*</div>\s*</div>',
         page_html,
     )
-    description = strip_tags(desc_fragment)
+    description = extract_sales_description(desc_fragment)
 
     product_name = first_match(r'<span class="title_text goods_name">(.*?)</span>', page_html)
     if not product_name:
@@ -218,12 +292,20 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
     vehicle_name = extract_dd("対応車種", desc_fragment)
     vehicle_model = extract_dd_any(["型式", "車輌型式", "車両型式", "対応型式"], desc_fragment)
     vehicle_year = extract_dd_any(["年式", "対応年式"], desc_fragment)
-    material_color = extract_dd("素材/カラー", desc_fragment)
+    parsed_vehicle_name, parsed_vehicle_model, parsed_vehicle_year = split_vehicle_lines(vehicle_name)
+    if parsed_vehicle_name:
+        vehicle_name = parsed_vehicle_name
+    if parsed_vehicle_model:
+        vehicle_model = parsed_vehicle_model
+    if parsed_vehicle_year:
+        vehicle_year = parsed_vehicle_year
+    material_color = extract_dd_any(["素材/カラー", "カラー設定", "設定カラー", "カラー"], desc_fragment)
     basic_product_name = extract_dd("商品名", desc_fragment)
     if not product_name and basic_product_name:
         product_name = basic_product_name
 
-    colors = extract_configured_colors(page_html) or split_colors(material_color)
+    variants = extract_variants(page_html)
+    colors = [color for color, _part_number in variants] or extract_configured_colors(page_html) or extract_color_setting(desc_fragment) or split_colors(material_color)
     if not vehicle_model:
         vehicle_model = infer_vehicle_model(vehicle_name)
     if not vehicle_year:
@@ -234,10 +316,8 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
         r'id="tax_included_price" class="figure">\s*([0-9,]+)\s*<span[^>]*>円</span>',
         page_html,
     )
-    if price_ex_tax:
-        price_ex_tax += "円"
-    if price_in_tax:
-        price_in_tax += "円"
+    price_ex_tax = normalize_price(price_ex_tax)
+    price_in_tax = normalize_price(price_in_tax)
 
     image_urls = []
     for image_url in re.findall(
@@ -261,6 +341,7 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
         price_ex_tax=price_ex_tax,
         price_in_tax=price_in_tax,
         image_urls=image_urls,
+        variants=variants,
     )
 
 
@@ -270,7 +351,7 @@ def fit_to_square_800(input_path: Path, output_path: Path) -> None:
         image.thumbnail((800, 800), Image.Resampling.LANCZOS)
         canvas = Image.new("RGB", (800, 800), "white")
         canvas.paste(image, ((800 - image.width) // 2, (800 - image.height) // 2))
-        canvas.save(output_path, quality=95, subsampling=0)
+        canvas.save(output_path)
 
 
 def remove_background_with_api(input_path: Path, cutout_path: Path) -> bool:
@@ -353,7 +434,7 @@ def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool
             cutout_image,
             ((800 - cutout_image.width) // 2, (800 - cutout_image.height) // 2),
         )
-        canvas.convert("RGB").save(output_path, quality=95, subsampling=0)
+        canvas.convert("RGB").save(output_path)
         return True
     except Exception:
         traceback.print_exc()
@@ -381,8 +462,9 @@ def write_csv(product: ProductData, image_names: list[str], run_dir: Path) -> Pa
         "カラー",
         "メーカー品番",
         "税込み価格",
+        "商品説明文",
     ]
-    colors = product.colors or [""]
+    variants = product.variants or [(color, product.manufacturer_part_number) for color in (product.colors or [""])]
     rows = [
         {
             "元URL": product.url,
@@ -392,10 +474,11 @@ def write_csv(product: ProductData, image_names: list[str], run_dir: Path) -> Pa
             "ブランク": "",
             "商品名": product.product_name,
             "カラー": color,
-            "メーカー品番": product.manufacturer_part_number,
+            "メーカー品番": part_number,
             "税込み価格": product.price_in_tax,
+            "商品説明文": product.description,
         }
-        for color in colors
+        for color, part_number in variants
     ]
 
     with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
@@ -436,7 +519,8 @@ def process_product(url: str, image_rename_code: str = "") -> tuple[ProductData,
         ext = Path(urllib.parse.urlparse(image_url).path).suffix.lower() or ".jpg"
         source_path = source_dir / f"image_{url_index:02d}_original{ext}"
         source_path.write_bytes(fetch_bytes(image_url))
-        output_name = f"{image_name_base}_{url_index:02d}.jpg"
+        suffix = "" if url_index == 1 else f"_{url_index - 1}"
+        output_name = f"{image_name_base}{suffix}.png"
         if url_index == 1:
             auto_white_background = remove_background_to_square_800(source_path, image_dir / output_name)
         else:
@@ -611,7 +695,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
       <div class="field">
         <label for="image_rename_code">画像リネーム用 品番</label>
         <input id="image_rename_code" name="image_rename_code" type="text" placeholder="例: BED07-BR">
-        <p class="hint">入力すると画像名を「品番_01.jpg」「品番_02.jpg」の形式にします。未入力の場合はメーカー品番を使います。</p>
+        <p class="hint">入力すると画像名を「品番.png」「品番_1.png」「品番_2.png」の形式にします。未入力の場合はメーカー品番を使います。</p>
       </div>
       <button type="submit">CSVと画像ZIPを作成</button>
     </form>
@@ -620,8 +704,8 @@ def page_html(result: str = "", error: str = "") -> bytes:
     {error}
 
     <section class="grid" aria-label="処理内容">
-      <div class="metric"><strong>抽出項目</strong><span>元URL、車種名、車種型番、車種年式、商品名、カラー、メーカー品番、税込み価格。</span></div>
-      <div class="metric"><strong>画像処理</strong><span>1枚目は自動白抜き、全画像を白背景の800×800 JPGに変換。元画像はsource_imagesに保存。</span></div>
+      <div class="metric"><strong>抽出項目</strong><span>元URL、車種名、車種型番、車種年式、商品名、カラー、メーカー品番、税込み価格、商品説明文。</span></div>
+      <div class="metric"><strong>画像処理</strong><span>1枚目は自動白抜き、全画像を白背景の800×800 PNGに変換。元画像はsource_imagesに保存。</span></div>
       <div class="metric"><strong>出力</strong><span>product.csv、imagesフォルダー、source_imagesフォルダーをZIPでダウンロード。</span></div>
     </section>
   </main>
