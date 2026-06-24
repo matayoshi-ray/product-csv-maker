@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageDraw, ImageStat
 except ImportError as exc:
     raise SystemExit(
         "Pillow is required. Run this with the bundled workspace Python shown by Codex."
@@ -27,6 +27,9 @@ ROOT = Path(__file__).resolve().parent
 OUTPUT_ROOT = Path(os.environ.get("OUTPUT_DIR", str(ROOT / "runs")))
 MAX_BODY_BYTES = 30 * 1024 * 1024
 REMOVE_BG_ENDPOINT = "https://api.remove.bg/v1.0/removebg"
+IMAGE_SIZE = 900
+TEMPLATE_PATH = ROOT / "assets" / "yp_listing_template.png"
+TEMPLATE_BAND_TOP = 835
 
 
 @dataclass
@@ -214,6 +217,17 @@ def split_vehicle_lines(vehicle_text: str) -> tuple[str, str, str]:
     vehicle_models: list[str] = []
     vehicle_years: list[str] = []
     for line in lines:
+        bracketed_vehicles = re.findall(r"([^/［\[]+?)\s*[［\[]([^］\]]+)[］\]]", line)
+        if len(bracketed_vehicles) > 1:
+            for name, model in bracketed_vehicles:
+                vehicle_names.append(clean_text(name))
+                vehicle_models.append(clean_text(model))
+                vehicle_years.append("")
+            inferred_year = infer_vehicle_year(line)
+            if inferred_year:
+                vehicle_years.append(inferred_year)
+            continue
+
         name = line
         model = ""
         year = ""
@@ -221,7 +235,7 @@ def split_vehicle_lines(vehicle_text: str) -> tuple[str, str, str]:
         if match:
             name = clean_text(match.group(1))
             model = clean_text(match.group(2))
-            year = clean_text(match.group(3))
+            year = infer_vehicle_year(match.group(3))
         else:
             inferred_model = infer_vehicle_model(line)
             inferred_year = infer_vehicle_year(line)
@@ -250,6 +264,12 @@ def extract_sales_description(desc_fragment: str) -> str:
 
 def normalize_price(value: str) -> str:
     return re.sub(r"\D", "", value)
+
+
+def clean_product_name(title_name: str, basic_name: str) -> str:
+    if basic_name:
+        return clean_text(basic_name)
+    return clean_text(re.sub(r"\s*【.*?】\s*$", "", title_name))
 
 
 def infer_vehicle_model(vehicle_text: str) -> str:
@@ -301,8 +321,7 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
         vehicle_year = parsed_vehicle_year
     material_color = extract_dd_any(["素材/カラー", "カラー設定", "設定カラー", "カラー"], desc_fragment)
     basic_product_name = extract_dd("商品名", desc_fragment)
-    if not product_name and basic_product_name:
-        product_name = basic_product_name
+    product_name = clean_product_name(product_name, basic_product_name)
 
     variants = extract_variants(page_html)
     colors = [color for color, _part_number in variants] or extract_configured_colors(page_html) or extract_color_setting(desc_fragment) or split_colors(material_color)
@@ -345,12 +364,51 @@ def parse_lanbo_product(url: str, page_html: str) -> ProductData:
     )
 
 
-def fit_to_square_800(input_path: Path, output_path: Path) -> None:
+def load_listing_template() -> Image.Image | None:
+    if not TEMPLATE_PATH.exists():
+        return None
+    with Image.open(TEMPLATE_PATH) as template:
+        image = template.convert("RGB")
+    if image.size != (IMAGE_SIZE, IMAGE_SIZE):
+        image = image.resize((IMAGE_SIZE, IMAGE_SIZE), Image.Resampling.LANCZOS)
+    return image
+
+
+def sample_background_color(image: Image.Image, box: tuple[int, int, int, int]) -> tuple[int, int, int]:
+    crop = image.crop(box)
+    stat = ImageStat.Stat(crop)
+    return tuple(int(value) for value in stat.median[:3])
+
+
+def remove_upper_left_logo(image: Image.Image) -> Image.Image:
+    image = image.convert("RGB")
+    width, height = image.size
+    logo_w = min(int(width * 0.26), 260)
+    logo_h = min(int(height * 0.14), 120)
+    sample_left = min(width - 1, logo_w + max(8, width // 40))
+    sample_right = min(width, sample_left + max(16, width // 12))
+    sample_bottom = min(height, max(12, logo_h // 2))
+    sample_stat = ImageStat.Stat(image.crop((sample_left, 0, sample_right, sample_bottom)))
+    if max(sample_stat.stddev[:3]) > 8:
+        return image
+    fill = sample_background_color(image, (sample_left, 0, sample_right, sample_bottom))
+    ImageDraw.Draw(image).rectangle((0, 0, logo_w, logo_h), fill=fill)
+    return image
+
+
+def fit_to_square(input_path: Path, output_path: Path, with_template_band: bool = False) -> None:
     with Image.open(input_path) as image:
         image = image.convert("RGB")
-        image.thumbnail((800, 800), Image.Resampling.LANCZOS)
-        canvas = Image.new("RGB", (800, 800), "white")
-        canvas.paste(image, ((800 - image.width) // 2, (800 - image.height) // 2))
+        if with_template_band:
+            image = remove_upper_left_logo(image)
+            max_height = TEMPLATE_BAND_TOP
+            canvas = load_listing_template() or Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), "white")
+        else:
+            max_height = IMAGE_SIZE
+            canvas = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), "white")
+        image.thumbnail((IMAGE_SIZE, max_height), Image.Resampling.LANCZOS)
+        y_space = max_height if with_template_band else IMAGE_SIZE
+        canvas.paste(image, ((IMAGE_SIZE - image.width) // 2, (y_space - image.height) // 2))
         canvas.save(output_path)
 
 
@@ -411,34 +469,34 @@ def has_meaningful_transparency(image: Image.Image) -> bool:
     return foreground_area < width * height * 0.92
 
 
-def remove_background_to_square_800(input_path: Path, output_path: Path) -> bool:
+def remove_background_to_square(input_path: Path, output_path: Path) -> bool:
     cutout_path = output_path.with_name(output_path.stem + "_cutout.png")
     try:
         if not remove_background_with_api(input_path, cutout_path):
-            fit_to_square_800(input_path, output_path)
+            fit_to_square(input_path, output_path)
             return False
 
         with Image.open(cutout_path) as cutout:
             cutout_image = cutout.convert("RGBA")
         if not has_meaningful_transparency(cutout_image):
-            fit_to_square_800(input_path, output_path)
+            fit_to_square(input_path, output_path)
             return False
 
         bbox = cutout_image.getbbox()
         if bbox:
             cutout_image = cutout_image.crop(bbox)
-        cutout_image.thumbnail((760, 760), Image.Resampling.LANCZOS)
+        cutout_image.thumbnail((860, 860), Image.Resampling.LANCZOS)
 
-        canvas = Image.new("RGBA", (800, 800), "white")
+        canvas = Image.new("RGBA", (IMAGE_SIZE, IMAGE_SIZE), "white")
         canvas.alpha_composite(
             cutout_image,
-            ((800 - cutout_image.width) // 2, (800 - cutout_image.height) // 2),
+            ((IMAGE_SIZE - cutout_image.width) // 2, (IMAGE_SIZE - cutout_image.height) // 2),
         )
         canvas.convert("RGB").save(output_path)
         return True
     except Exception:
         traceback.print_exc()
-        fit_to_square_800(input_path, output_path)
+        fit_to_square(input_path, output_path)
         return False
     finally:
         if cutout_path.exists():
@@ -522,9 +580,9 @@ def process_product(url: str, image_rename_code: str = "") -> tuple[ProductData,
         suffix = "" if url_index == 1 else f"_{url_index - 1}"
         output_name = f"{image_name_base}{suffix}.png"
         if url_index == 1:
-            auto_white_background = remove_background_to_square_800(source_path, image_dir / output_name)
+            auto_white_background = remove_background_to_square(source_path, image_dir / output_name)
         else:
-            fit_to_square_800(source_path, image_dir / output_name)
+            fit_to_square(source_path, image_dir / output_name, with_template_band=True)
         image_names.append(output_name)
 
     write_csv(product, image_names, run_dir)
@@ -683,7 +741,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
     <header>
       <div>
         <h1>商品CSVメーカー</h1>
-        <p class="sub">LANBOの商品URLから、CSVと800×800の商品画像入りZIPを生成します。</p>
+        <p class="sub">LANBOの商品URLから、CSVと900×900の商品画像入りZIPを生成します。</p>
       </div>
     </header>
 
@@ -705,7 +763,7 @@ def page_html(result: str = "", error: str = "") -> bytes:
 
     <section class="grid" aria-label="処理内容">
       <div class="metric"><strong>抽出項目</strong><span>元URL、車種名、車種型番、車種年式、商品名、カラー、メーカー品番、税込み価格、商品説明文。</span></div>
-      <div class="metric"><strong>画像処理</strong><span>1枚目は自動白抜き、全画像を白背景の800×800 PNGに変換。元画像はsource_imagesに保存。</span></div>
+      <div class="metric"><strong>画像処理</strong><span>1枚目は自動白抜き、2枚目以降は下帯付きの900×900 PNGに変換。元画像はsource_imagesに保存。</span></div>
       <div class="metric"><strong>出力</strong><span>product.csv、imagesフォルダー、source_imagesフォルダーをZIPでダウンロード。</span></div>
     </section>
   </main>

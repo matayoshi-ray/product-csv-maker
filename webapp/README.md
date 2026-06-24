@@ -1,6 +1,6 @@
 # 商品CSVメーカー
 
-LANBOの商品URLを入力すると、商品情報CSVと800x800の商品画像をZIPで出力するWebアプリです。
+LANBOの商品URLを入力すると、商品情報CSVと900x900の商品画像をZIPで出力するWebアプリです。
 
 ## 起動
 
@@ -29,7 +29,7 @@ OUTPUT_DIR=/tmp/product-csv-maker-runs
 ## 出力内容
 
 - `product.csv`
-- `images/<品番>.png` 以降の800x800画像
+- `images/<品番>.png` 以降の900x900画像
 - `source_images/` 配下の元画像
 - 上記一式のZIP
 
@@ -52,6 +52,6 @@ CSVには以下を入れます。
 
 ## 白抜き画像について
 
-1枚目の商品画像は、`REMOVE_BG_API_KEY`が設定されている場合にremove.bg APIで自動白抜きしてから白背景の800x800 PNGに変換します。
+1枚目の商品画像は、`REMOVE_BG_API_KEY`が設定されている場合にremove.bg APIで自動白抜きしてから白背景の900x900 PNGに変換します。2枚目以降は下帯テンプレート付きの900x900 PNGに変換します。
 
-`REMOVE_BG_API_KEY`が未設定の場合、またはAPIの結果に十分な透明部分がない場合は、処理停止を避けるため通常の800x800変換へ戻します。Render FreeではローカルAI白抜きがメモリ不足になりやすいため、外部API方式にしています。
+`REMOVE_BG_API_KEY`が未設定の場合、またはAPIの結果に十分な透明部分がない場合は、処理停止を避けるため通常の900x900変換へ戻します。Render FreeではローカルAI白抜きがメモリ不足になりやすいため、外部API方式にしています。
