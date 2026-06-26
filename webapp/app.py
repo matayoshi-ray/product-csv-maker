@@ -380,17 +380,34 @@ def sample_background_color(image: Image.Image, box: tuple[int, int, int, int]) 
     return tuple(int(value) for value in stat.median[:3])
 
 
+def has_upper_left_maker_logo(image: Image.Image) -> bool:
+    width, height = image.size
+    crop = image.crop((0, 0, min(width, int(width * 0.34)), min(height, int(height * 0.18))))
+    pixels = list(crop.getdata())
+    if not pixels:
+        return False
+    red_pixels = 0
+    bright_pixels = 0
+    for red, green, blue in pixels:
+        if red > 140 and green < 110 and blue < 110:
+            red_pixels += 1
+        if red > 210 and green > 210 and blue > 210:
+            bright_pixels += 1
+    total = len(pixels)
+    return red_pixels / total > 0.002 and bright_pixels / total > 0.01
+
+
 def remove_upper_left_logo(image: Image.Image) -> Image.Image:
     image = image.convert("RGB")
+    if not has_upper_left_maker_logo(image):
+        return image
+
     width, height = image.size
-    logo_w = min(int(width * 0.26), 260)
-    logo_h = min(int(height * 0.14), 120)
+    logo_w = min(int(width * 0.5), 620)
+    logo_h = min(int(height * 0.16), 150)
     sample_left = min(width - 1, logo_w + max(8, width // 40))
     sample_right = min(width, sample_left + max(16, width // 12))
     sample_bottom = min(height, max(12, logo_h // 2))
-    sample_stat = ImageStat.Stat(image.crop((sample_left, 0, sample_right, sample_bottom)))
-    if max(sample_stat.stddev[:3]) > 8:
-        return image
     fill = sample_background_color(image, (sample_left, 0, sample_right, sample_bottom))
     ImageDraw.Draw(image).rectangle((0, 0, logo_w, logo_h), fill=fill)
     return image
